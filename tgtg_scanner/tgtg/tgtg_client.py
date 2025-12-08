@@ -204,8 +204,8 @@ class TgtgClient:
         resp.raise_for_status()
         data = resp.json()
 
-        if data.get("status") != 0:
-            raise TgtgAPIError(f"Datadome SDK returned non-zero status: {data}")
+        if data.get("status") != 200:
+            raise TgtgAPIError(f"Datadome SDK returned non-200 status: {data}")
 
         cookie_header = data.get("cookie")
         if not cookie_header:
