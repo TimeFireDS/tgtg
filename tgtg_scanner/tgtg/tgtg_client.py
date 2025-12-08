@@ -369,7 +369,10 @@ class TgtgClient:
                 raise TgtgLoginError(response.status_code, response.content)
 
     def auth_by_request_pin(self, polling_id) -> None:
-        pin = None
+        log.warning(
+            "Check your mailbox and insert the code to continue"
+        )
+        pin = input("Code: ").strip()
         for _ in range(self.max_polling_tries):
             response = self._post(
                 AUTH_BY_REQUEST_PIN_ENDPOINT,
@@ -382,9 +385,8 @@ class TgtgClient:
             )
             if response.status_code == HTTPStatus.ACCEPTED:
                 log.warning(
-                    "Check your mailbox and insert the code to continue"
+                    "Wait..."
                 )
-                pin = input("Code: ").strip()
                 time.sleep(self.polling_wait_time)
                 continue
             if response.status_code == HTTPStatus.OK:
