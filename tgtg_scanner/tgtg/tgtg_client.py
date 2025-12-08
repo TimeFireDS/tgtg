@@ -1,4 +1,5 @@
 # Copied and modified from https://github.com/ahivert/tgtg-python
+# Added Datadome cookie support
 
 import json
 import logging
@@ -6,6 +7,7 @@ import random
 import re
 import time
 import uuid
+import secrets
 from datetime import datetime
 from http import HTTPStatus
 from urllib.parse import urljoin, urlsplit
@@ -27,6 +29,7 @@ API_ITEM_ENDPOINT = "item/v9/"
 FAVORITE_ITEM_ENDPOINT = "user/favorite/v1/{}/update"
 AUTH_BY_EMAIL_ENDPOINT = "auth/v5/authByEmail"
 AUTH_POLLING_ENDPOINT = "auth/v5/authByRequestPollingId"
+AUTH_BY_REQUEST_PIN_ENDPOINT = "auth/v5/authByRequestPin"
 SIGNUP_BY_EMAIL_ENDPOINT = "auth/v5/signUpByEmail"
 REFRESH_ENDPOINT = "token/v1/refresh"
 ACTIVE_ORDER_ENDPOINT = "order/v8/active"
@@ -48,6 +51,10 @@ DEFAULT_APK_VERSION = "24.11.0"
 
 APK_RE_SCRIPT = re.compile(r"AF_initDataCallback\({key:\s*'ds:5'.*?data:([\s\S]*?), sideChannel:.+<\/script")
 
+# Datadome constants
+DATADOME_ENDPOINT = "https://api-sdk.datadome.co/sdk/"
+DATADOME_KEY = "1D42C2CA6131C526E09F294FE96F94"
+DATADOME_SDK_VERSION = "3.0.4"
 
 class TgtgSession(requests.Session):
     http_adapter = HTTPAdapter(
@@ -155,6 +162,59 @@ class TgtgClient:
         if self.session:
             self.session.close()
 
+    def _fetch_datadome_cookie(self, request_url: str) -> str:
+        """Fetch a new Datadome cookie by emulating the Android SDK POST to the SDK endpoint.
+        Returns the raw datadome cookie value (without the `datadome=` prefix).
+        """
+        cid = secrets.token_hex(32)
+        d_ifv = secrets.token_hex(16)
+
+        events = [{"id": 1, "message": "response validation", "source": "sdk", "date": int(time.time() * 1000)}]
+
+        payload = {
+            "cid": cid,
+            "ddk": DATADOME_KEY,
+            "request": request_url,
+            "ua": self.user_agent or f"TGTG/{DEFAULT_APK_VERSION} Dalvik/2.1.0 (Linux; U; Android 14; Pixel 7 Pro Build/UQ1A.240105.004)",
+            "events": json.dumps(events),
+            "inte": "android-java-okhttp",
+            "ddv": DATADOME_SDK_VERSION,
+            "ddvc": self.apk_version or DEFAULT_APK_VERSION,
+            "os": "Android",
+            "osr": "14",
+            "osn": "UPSIDE_DOWN_CAKE",
+            "osv": "34",
+            "screen_x": "1440",
+            "screen_y": "3120",
+            "screen_d": "3.5",
+            "camera": json.dumps({"auth": "true", "info": json.dumps({"front": "2000x1500", "back": "5472x3648"})}),
+            "mdl": "Pixel 7 Pro",
+            "prd": "Pixel 7 Pro",
+            "mnf": "Google",
+            "dev": "cheetah",
+            "hrd": "GS201",
+            "fgp": "google/cheetah/cheetah:14/UQ1A.240105.004/10814564:user/release-keys",
+            "tgs": "release-keys",
+            "d_ifv": d_ifv,
+        }
+
+        headers = {"User-Agent": "okhttp/5.1.0", "Content-Type": "application/x-www-form-urlencoded"}
+
+        resp = requests.post(DATADOME_ENDPOINT, headers=headers, data=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("status") != 0:
+            raise TgtgAPIError(f"Datadome SDK returned non-zero status: {data}")
+
+        cookie_header = data.get("cookie")
+        if not cookie_header:
+            raise TgtgAPIError(f"Datadome response missing cookie: {data}")
+
+        # cookie_header looks like: "datadome=...; Path=/; Secure; HttpOnly"
+        cookie_value = cookie_header.split("datadome=", 1)[1].split(";", 1)[0]
+        return cookie_value
+
     def _get_url(self, path) -> str:
         return urljoin(self.base_url, path)
 
@@ -193,27 +253,41 @@ class TgtgClient:
             access_token=self.access_token,
             **kwargs,
         )
-        self.datadome_cookie = self.session.cookies.get("datadome")
+        # Update datadome cookie from session if present
+        self.datadome_cookie = self.session.cookies.get("datadome") or self.datadome_cookie
         if response.status_code in (HTTPStatus.OK, HTTPStatus.ACCEPTED):
             self.captcha_error_count = 0
             return response
-        # Status Code == 403
-        # --> Blocked due to rate limit / wrong user_agent.
-        # 1. Try: Get latest APK Version from google
-        # 2. Try: Reset session
-        # 3. Try: Delete datadome cookie and reset session
-        # 10.Try: Sleep 10 minutes, and reset session
+        # Handle 403 by attempting Datadome cookie refresh (minimal strategy)
         if response.status_code == 403:
-            log.debug("Captcha Error 403!")
+            log.debug("Captcha Error 403 for path %s", path)
             self.captcha_error_count += 1
+            # Try a few lightweight mitigations first
             if self.captcha_error_count == 1:
+                # rotate user-agent
                 self.user_agent = self._get_user_agent()
+                self.session = self._create_session()
             elif self.captcha_error_count == 2:
+                # reset session
                 self.session = self._create_session()
-            elif self.captcha_error_count == 4:
-                self.datadome_cookie = None
-                self.session = self._create_session()
-            elif self.captcha_error_count >= 10:
+            else:
+                # attempt to fetch a fresh datadome cookie and retry once
+                try:
+                    new_cookie = self._fetch_datadome_cookie(self._get_url(path))
+                    self.datadome_cookie = new_cookie
+                    # create a fresh session carrying the new cookie
+                    self.session = self._create_session()
+                    log.info("Datadome cookie refreshed successfully")
+                    # retry original request once
+                    response = self.session.post(self._get_url(path), access_token=self.access_token, **kwargs)
+                    self.datadome_cookie = self.session.cookies.get("datadome") or self.datadome_cookie
+                    if response.status_code in (HTTPStatus.OK, HTTPStatus.ACCEPTED):
+                        self.captcha_error_count = 0
+                        return response
+                except Exception as e:
+                    log.error("Failed to refresh Datadome cookie: %s", e)
+            # Backoff and retry recursively up to internal logic
+            if self.captcha_error_count >= 10:
                 log.warning("Too many captcha Errors! Sleeping for 10 minutes...")
                 time.sleep(10 * 60)
                 log.info("Retrying ...")
@@ -290,24 +364,27 @@ class TgtgClient:
                     f"This email {self.email} is not linked to a tgtg account. Please signup with this email first."
                 )
             if first_login_response.get("state") == "WAIT":
-                self.start_polling(first_login_response.get("polling_id"))
+                self.auth_by_request_pin(first_login_response.get("polling_id"))
             else:
                 raise TgtgLoginError(response.status_code, response.content)
 
-    def start_polling(self, polling_id) -> None:
+    def auth_by_request_pin(self, polling_id) -> None:
+        pin = None
         for _ in range(self.max_polling_tries):
             response = self._post(
-                AUTH_POLLING_ENDPOINT,
+                AUTH_BY_REQUEST_PIN_ENDPOINT,
                 json={
                     "device_type": self.device_type,
                     "email": self.email,
                     "request_polling_id": polling_id,
+                    "request_pin": pin,
                 },
             )
             if response.status_code == HTTPStatus.ACCEPTED:
                 log.warning(
-                    "Check your mailbox on PC to continue... (Mailbox on mobile won't work, if you have installed tgtg app.)"
+                    "Check your mailbox and insert the code to continue"
                 )
+                pin = input("Code: ").strip()
                 time.sleep(self.polling_wait_time)
                 continue
             if response.status_code == HTTPStatus.OK:
