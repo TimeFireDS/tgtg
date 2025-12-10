@@ -166,7 +166,6 @@ class Scanner:
         # Search for Telegram notifier among active notifiers
         for notifier in self.notifiers._notifiers:
             if hasattr(notifier, 'request_pin_via_telegram'):
-                log.info("Configured PIN callback via Telegram")
                 self.tgtg_client.pin_callback = notifier.request_pin_via_telegram
                 return
         
