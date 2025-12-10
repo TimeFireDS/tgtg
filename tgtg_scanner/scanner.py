@@ -39,7 +39,7 @@ class Activity:
     def flush(self) -> None:
         """Flush function that flushes the spinner."""
         if self.spinner:
-            sys.stdout.write("\u001B[80D\u001B[K")
+            sys.stdout.write("\x1b[80D\x1b[K")
             sys.stdout.flush()
 
 
