@@ -49,7 +49,7 @@ DEFAULT_MAX_POLLING_TRIES = 24  # 24 * POLLING_WAIT_TIME = 2 minutes
 DEFAULT_POLLING_WAIT_TIME = 5  # Seconds
 DEFAULT_APK_VERSION = "24.11.0"
 
-APK_RE_SCRIPT = re.compile(r"AF_initDataCallback\({key:\s*'ds:5'.*?data:([\s\S]*?), sideChannel:.+<\/script")
+APK_RE_SCRIPT = re.compile(r"AF_initDataCallback({key:s*'ds:5'.*?data:([sS]*?), sideChannel:.+</script")
 
 # Datadome constants
 DATADOME_ENDPOINT = "https://api-sdk.datadome.co/sdk/"
@@ -131,6 +131,7 @@ class TgtgClient:
         max_polling_tries=DEFAULT_MAX_POLLING_TRIES,
         polling_wait_time=DEFAULT_POLLING_WAIT_TIME,
         device_type="ANDROID",
+        pin_callback=None,
     ):
         if base_url != BASE_URL:
             log.warning("Using custom tgtg base url: %s", base_url)
@@ -157,6 +158,7 @@ class TgtgClient:
         self.session = None
 
         self.captcha_error_count = 0
+        self.pin_callback = pin_callback
 
     def __del__(self) -> None:
         if self.session:
@@ -369,10 +371,20 @@ class TgtgClient:
                 raise TgtgLoginError(response.status_code, response.content)
 
     def auth_by_request_pin(self, polling_id) -> None:
-        log.warning(
-            "Check your mailbox and insert the code to continue"
-        )
-        pin = input("Code: ").strip()
+        # If there's a configured callback (e.g., Telegram), use it
+        if self.pin_callback:
+            log.info("Requesting PIN via callback...")
+            try:
+                pin = self.pin_callback()
+            except Exception as exc:
+                log.error("PIN callback error: %s. Falling back to manual input.", exc)
+                log.warning("Check your mailbox and insert the code to continue")
+                pin = input("Code: ").strip()
+        else:
+            # Fallback: request from terminal
+            log.warning("Check your mailbox and insert the code to continue")
+            pin = input("Code: ").strip()
+        
         for _ in range(self.max_polling_tries):
             response = self._post(
                 AUTH_BY_REQUEST_PIN_ENDPOINT,
@@ -384,9 +396,7 @@ class TgtgClient:
                 },
             )
             if response.status_code == HTTPStatus.ACCEPTED:
-                log.warning(
-                    "Wait..."
-                )
+                log.warning("Wait...")
                 time.sleep(self.polling_wait_time)
                 continue
             if response.status_code == HTTPStatus.OK:
