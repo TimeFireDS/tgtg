@@ -330,10 +330,7 @@ class Telegram(Notifier):
             
             # Timeout reached
             if not self.pin_response:
-                timeout_msg = "⏱️ *Timeout*
-
-PIN was not received within 2 minutes\\.
-Please retry the login\\."
+                timeout_msg = "⏱️ *Timeout*\nPIN was not received within 2 minutes\\.Please retry the login\\."
                 for chat_id in self.chat_ids:
                     try:
                         await self.application.bot.send_message(
