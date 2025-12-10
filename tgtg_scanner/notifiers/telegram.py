@@ -72,6 +72,8 @@ class Telegram(Notifier):
         self.only_reservations = config.telegram.only_reservations
         self.cron = config.telegram.cron
         self.mute: datetime.datetime | None = None
+        self.pending_pin_request = False
+        self.pin_response = None
         self.retries = 0
         if self.enabled:
             if not self.token or not self.body:
@@ -116,9 +118,10 @@ class Telegram(Notifier):
             CommandHandler("removefavorites", self._remove_favorites),
             CommandHandler("getid", self._get_id),
             MessageHandler(
-                filters.Regex(r"^https:\/\/share\.toogoodtogo\.com\/item\/(\d+)\/?"),
+                filters.Regex(r"^https://share.toogoodtogo.com/item/(d+)/?"),
                 self._url_handler,
             ),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message),
             CallbackQueryHandler(self._callback_query_handler),
         ]
 
@@ -262,6 +265,108 @@ class Telegram(Notifier):
         await update.message.reply_text(f"Current chat id: {update.message.chat.id}")
 
     @_private
+    async def _handle_text_message(self, update: Update, _) -> None:
+        """Handles text messages, including PIN when requested."""
+        if self.pending_pin_request:
+            pin = update.message.text.strip()
+            if pin.isdigit() and len(pin) >= 4:
+                self.pin_response = pin
+                self.pending_pin_request = False
+                await update.message.reply_text(f"✅ PIN received: {pin}
+
+Authentication in progress...")
+                log.info("PIN received via Telegram: %s", pin)
+            else:
+                await update.message.reply_text("⚠️ Invalid PIN. Please enter numbers only (minimum 4 digits).")
+
+    def request_pin_via_telegram(self) -> str:
+        """Request PIN via Telegram and wait for user response.
+        
+        This method is called synchronously by TgtgClient during login.
+        Sends a message to all configured chat_ids and waits up to 2 minutes.
+        
+        Returns:
+            str: The PIN entered by the user
+            
+        Raises:
+            TgtgLoginError: If PIN is not received within timeout
+        """
+        if not self.application:
+            log.error("Telegram application not initialized. Unable to request PIN.")
+            log.warning("Fallback: please enter the PIN manually")
+            return input("Code: ").strip()
+        
+        async def _request_pin_async():
+            self.pending_pin_request = True
+            self.pin_response = None
+            
+            message = (
+                "🔐 *TGTG authentication required*
+
+"
+                "Check your email and enter the PIN code you received\\.
+
+"
+                "⏱️ You have 2 minutes to reply\\."
+            )
+            
+            # Send request to all configured chats
+            for chat_id in self.chat_ids:
+                try:
+                    await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=message,
+                        parse_mode=ParseMode.MARKDOWN_V2
+                    )
+                    log.info("PIN request sent to chat_id: %s", chat_id)
+                except TelegramError as exc:
+                    log.error("Error sending PIN request to chat %s: %s", chat_id, exc)
+            
+            # Wait for response (max 2 minutes = 120 seconds)
+            timeout = 120
+            elapsed = 0
+            
+            while self.pending_pin_request and elapsed < timeout:
+                await asyncio.sleep(1)
+                elapsed += 1
+                
+                # Log every 30 seconds
+                if elapsed % 30 == 0:
+                    log.debug("Waiting for PIN... %d/%d seconds", elapsed, timeout)
+            
+            # Timeout reached
+            if not self.pin_response:
+                timeout_msg = "⏱️ *Timeout*
+
+PIN was not received within 2 minutes\\.
+Please retry the login\\."
+                for chat_id in self.chat_ids:
+                    try:
+                        await self.application.bot.send_message(
+                            chat_id=chat_id,
+                            text=timeout_msg,
+                            parse_mode=ParseMode.MARKDOWN_V2
+                        )
+                    except TelegramError:
+                        pass
+                
+                log.error("Timeout: PIN not received within %d seconds", timeout)
+                from tgtg_scanner.errors import TgtgLoginError
+                raise TgtgLoginError("PIN not received via Telegram within timeout")
+            
+            log.info("PIN successfully received")
+            return self.pin_response
+        
+        # Execute async request
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(_request_pin_async())
+        except Exception as exc:
+            log.error("Error requesting PIN via Telegram: %s", exc)
+            log.warning("Fallback: please enter the PIN manually")
+            return input("Code: ").strip()
+
+    @_private
     async def _mute(self, update: Update, context: CallbackContext) -> None:
         """Deactivates Telegram Notifications for x days."""
         days = int(context.args[0]) if context.args and context.args[0].isnumeric() else 1
@@ -269,7 +374,8 @@ class Telegram(Notifier):
         log.info("Deactivated Telegram Notifications for %s days", days)
         log.info("Reactivation at %s", self.mute)
         await update.message.reply_text(
-            f"Deactivated Telegram Notifications for {days} days.\nReactivating at {self.mute} or use /unmute."
+            f"Deactivated Telegram Notifications for {days} days.
+Reactivating at {self.mute} or use /unmute."
         )
 
     @_private
@@ -324,7 +430,8 @@ class Telegram(Notifier):
         if not favorites:
             await update.message.reply_text("You currently don't have any favorites.")
         else:
-            await update.message.reply_text("\n".join([f"• {item.item_id} - {item.display_name}" for item in favorites]))
+            await update.message.reply_text("
+".join([f"• {item.item_id} - {item.display_name}" for item in favorites]))
 
     @_private
     async def _list_favorite_ids(self, update: Update, _) -> None:
@@ -449,7 +556,6 @@ class Telegram(Notifier):
                 self.favorites.add_favorites([data.item_id])
                 await update.callback_query.edit_message_text(f"Added {data.item_display_name} to favorites")
                 log.debug('Added "%s" to favorites', data.item_display_name)
-                log.debug('Removed "%s" from favorites', data.item_display_name)
             else:
                 await update.callback_query.delete_message()
         if isinstance(data, RemoveFavoriteRequest):
@@ -466,7 +572,8 @@ class Telegram(Notifier):
 
     async def _get_chat_id(self) -> None:
         r"""Initializes an interaction with the user
-        to obtain the telegram chat id. \n
+        to obtain the telegram chat id. 
+
         On using the config.ini configuration the
         chat id will be stored in the config.ini.
         """
