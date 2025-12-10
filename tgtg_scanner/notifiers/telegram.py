@@ -299,12 +299,8 @@ class Telegram(Notifier):
             self.pin_response = None
             
             message = (
-                "🔐 *TGTG authentication required*
-
-"
-                "Check your email and enter the PIN code you received\\.
-
-"
+                "🔐 *TGTG authentication required*"
+                "Check your email and enter the PIN code you received\\."
                 "⏱️ You have 2 minutes to reply\\."
             )
             
