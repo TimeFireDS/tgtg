@@ -272,7 +272,7 @@ class Telegram(Notifier):
             if pin.isdigit() and len(pin) >= 4:
                 self.pin_response = pin
                 self.pending_pin_request = False
-                await update.message.reply_text(f"✅ PIN received: {pin}\nAuthentication in progress...")
+                await update.message.reply_text(f"✅ PIN received: {pin}\n\nAuthentication in progress...")
                 log.info("PIN received via Telegram: %s", pin)
             else:
                 await update.message.reply_text("⚠️ Invalid PIN. Please enter numbers only (minimum 4 digits).")
@@ -299,8 +299,8 @@ class Telegram(Notifier):
             self.pin_response = None
             
             message = (
-                "🔐 *TGTG authentication required*"
-                "Check your email and enter the PIN code you received\\."
+                "🔐 *TGTG authentication required*\n\n"
+                "Check your email and enter the PIN code you received\\.\n\n"
                 "⏱️ You have 2 minutes to reply\\."
             )
             
@@ -330,7 +330,7 @@ class Telegram(Notifier):
             
             # Timeout reached
             if not self.pin_response:
-                timeout_msg = "⏱️ *Timeout*\nPIN was not received within 2 minutes\\.Please retry the login\\."
+                timeout_msg = "⏱️ *Timeout*\n\nPIN was not received within 2 minutes\\.\nPlease retry the login\\."
                 for chat_id in self.chat_ids:
                     try:
                         await self.application.bot.send_message(
@@ -348,10 +348,18 @@ class Telegram(Notifier):
             log.info("PIN successfully received")
             return self.pin_response
         
-        # Execute async request
+        # Execute async request - handle different scenarios
         try:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(_request_pin_async())
+            # Try to get existing event loop
+            try:
+                loop = asyncio.get_running_loop()
+                # If we're already in an async context, we can't use run_until_complete
+                log.error("Cannot request PIN from within async context")
+                log.warning("Fallback: please enter the PIN manually")
+                return input("Code: ").strip()
+            except RuntimeError:
+                # No running loop, create a new one
+                return asyncio.run(_request_pin_async())
         except Exception as exc:
             log.error("Error requesting PIN via Telegram: %s", exc)
             log.warning("Fallback: please enter the PIN manually")
