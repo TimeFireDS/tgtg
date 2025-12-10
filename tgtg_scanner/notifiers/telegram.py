@@ -118,7 +118,7 @@ class Telegram(Notifier):
             CommandHandler("removefavorites", self._remove_favorites),
             CommandHandler("getid", self._get_id),
             MessageHandler(
-                filters.Regex(r"^https://share.toogoodtogo.com/item/(d+)/?"),
+                filters.Regex(r"^https:\/\/share\.toogoodtogo\.com\/item\/(\d+)\/?"),
                 self._url_handler,
             ),
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message),
@@ -374,8 +374,7 @@ Please retry the login\\."
         log.info("Deactivated Telegram Notifications for %s days", days)
         log.info("Reactivation at %s", self.mute)
         await update.message.reply_text(
-            f"Deactivated Telegram Notifications for {days} days.
-Reactivating at {self.mute} or use /unmute."
+            f"Deactivated Telegram Notifications for {days} days.\nReactivating at {self.mute} or use /unmute."
         )
 
     @_private
@@ -430,8 +429,7 @@ Reactivating at {self.mute} or use /unmute."
         if not favorites:
             await update.message.reply_text("You currently don't have any favorites.")
         else:
-            await update.message.reply_text("
-".join([f"• {item.item_id} - {item.display_name}" for item in favorites]))
+            await update.message.reply_text("\n".join([f"• {item.item_id} - {item.display_name}" for item in favorites]))
 
     @_private
     async def _list_favorite_ids(self, update: Update, _) -> None:
@@ -556,6 +554,7 @@ Reactivating at {self.mute} or use /unmute."
                 self.favorites.add_favorites([data.item_id])
                 await update.callback_query.edit_message_text(f"Added {data.item_display_name} to favorites")
                 log.debug('Added "%s" to favorites', data.item_display_name)
+                log.debug('Removed "%s" from favorites', data.item_display_name)
             else:
                 await update.callback_query.delete_message()
         if isinstance(data, RemoveFavoriteRequest):
@@ -572,8 +571,7 @@ Reactivating at {self.mute} or use /unmute."
 
     async def _get_chat_id(self) -> None:
         r"""Initializes an interaction with the user
-        to obtain the telegram chat id. 
-
+        to obtain the telegram chat id. \n
         On using the config.ini configuration the
         chat id will be stored in the config.ini.
         """
