@@ -39,7 +39,7 @@ class Activity:
     def flush(self) -> None:
         """Flush function that flushes the spinner."""
         if self.spinner:
-            sys.stdout.write("\x1b[80D\x1b[K")
+            sys.stdout.write("\u001B[80D\u001B[K")
             sys.stdout.flush()
 
 
@@ -158,29 +158,51 @@ class Scanner:
         )
         self.notifiers.send(item)
 
+    def _setup_pin_callback(self) -> None:
+        """Configure the callback to request PIN via Telegram if available."""
+        if self.notifiers is None:
+            return
+        
+        # Search for Telegram notifier among active notifiers
+        for notifier in self.notifiers.notifiers:
+            if hasattr(notifier, 'request_pin_via_telegram'):
+                log.info("Configured PIN callback via Telegram")
+                self.tgtg_client.pin_callback = notifier.request_pin_via_telegram
+                return
+        
+        log.debug("Telegram notifier not found, PIN will be requested from terminal")
+
     def run(self) -> NoReturn:
         """Main Loop of the Scanner."""
-        # test tgtg API
-        self.tgtg_client.login()
-        self.config.save_tokens(
-            self.tgtg_client.access_token,
-            self.tgtg_client.refresh_token,
-            self.tgtg_client.datadome_cookie,
-        )
         # activate location service
         self.location = Location(
             self.config.location.enabled,
             self.config.location.google_maps_api_key,
             self.config.location.origin_address,
         )
+        
         # activate and test notifiers
         if self.config.metrics:
             self.metrics.enable_metrics()
         self.notifiers = Notifiers(self.config, self.reservations, self.favorites)
         self.notifiers.start()
+        
+        # Configure PIN callback from Telegram before login
+        self._setup_pin_callback()
+        
+        # test tgtg API (now with PIN callback configured)
+        self.tgtg_client.login()
+        self.config.save_tokens(
+            self.tgtg_client.access_token,
+            self.tgtg_client.refresh_token,
+            self.tgtg_client.datadome_cookie,
+        )
+        
+        # test notifications
         if not self.config.disable_tests and self.notifiers.notifier_count > 0:
             log.info("Sending test Notifications ...")
             self.notifiers.send(self._get_test_item())
+        
         # start scanner
         log.info("Scanner started ...")
         running = True
