@@ -272,9 +272,7 @@ class Telegram(Notifier):
             if pin.isdigit() and len(pin) >= 4:
                 self.pin_response = pin
                 self.pending_pin_request = False
-                await update.message.reply_text(f"✅ PIN received: {pin}
-
-Authentication in progress...")
+                await update.message.reply_text(f"✅ PIN received: {pin}\nAuthentication in progress...")
                 log.info("PIN received via Telegram: %s", pin)
             else:
                 await update.message.reply_text("⚠️ Invalid PIN. Please enter numbers only (minimum 4 digits).")
