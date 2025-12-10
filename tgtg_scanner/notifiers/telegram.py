@@ -281,7 +281,7 @@ class Telegram(Notifier):
         """Request PIN via Telegram and wait for user response.
         
         This method is called synchronously by TgtgClient during login.
-        Sends a message to all configured chat_ids and waits up to 2 minutes.
+        Uses the existing Telegram bot event loop to send messages.
         
         Returns:
             str: The PIN entered by the user
@@ -294,76 +294,107 @@ class Telegram(Notifier):
             log.warning("Fallback: please enter the PIN manually")
             return input("Code: ").strip()
         
-        async def _request_pin_async():
-            self.pending_pin_request = True
-            self.pin_response = None
-            
-            message = (
-                "🔐 *TGTG authentication required*\n\n"
-                "Check your email and enter the PIN code you received\\.\n\n"
-                "⏱️ You have 2 minutes to reply\\."
-            )
-            
-            # Send request to all configured chats
-            for chat_id in self.chat_ids:
-                try:
-                    await self.application.bot.send_message(
-                        chat_id=chat_id,
-                        text=message,
-                        parse_mode=ParseMode.MARKDOWN_V2
-                    )
-                    log.info("PIN request sent to chat_id: %s", chat_id)
-                except TelegramError as exc:
-                    log.error("Error sending PIN request to chat %s: %s", chat_id, exc)
-            
-            # Wait for response (max 2 minutes = 120 seconds)
-            timeout = 120
-            elapsed = 0
-            
-            while self.pending_pin_request and elapsed < timeout:
-                await asyncio.sleep(1)
-                elapsed += 1
-                
-                # Log every 30 seconds
-                if elapsed % 30 == 0:
-                    log.debug("Waiting for PIN... %d/%d seconds", elapsed, timeout)
-            
-            # Timeout reached
-            if not self.pin_response:
-                timeout_msg = "⏱️ *Timeout*\n\nPIN was not received within 2 minutes\\.\nPlease retry the login\\."
-                for chat_id in self.chat_ids:
-                    try:
-                        await self.application.bot.send_message(
-                            chat_id=chat_id,
-                            text=timeout_msg,
-                            parse_mode=ParseMode.MARKDOWN_V2
-                        )
-                    except TelegramError:
-                        pass
-                
-                log.error("Timeout: PIN not received within %d seconds", timeout)
-                from tgtg_scanner.errors import TgtgLoginError
-                raise TgtgLoginError("PIN not received via Telegram within timeout")
-            
-            log.info("PIN successfully received")
-            return self.pin_response
+        # Reset state
+        self.pending_pin_request = True
+        self.pin_response = None
         
-        # Execute async request - handle different scenarios
-        try:
-            # Try to get existing event loop
+        # Send PIN request message
+        message = (
+            "🔐 *TGTG authentication required*\n\n"
+            "Check your email and enter the PIN code you received\\.\n\n"
+            "⏱️ You have 2 minutes to reply\\."
+        )
+        
+        # Use application's existing event loop to send message
+        import concurrent.futures
+        from threading import Thread
+        
+        def send_message():
+            """Send message in the bot's event loop."""
             try:
-                loop = asyncio.get_running_loop()
-                # If we're already in an async context, we can't use run_until_complete
-                log.error("Cannot request PIN from within async context")
-                log.warning("Fallback: please enter the PIN manually")
-                return input("Code: ").strip()
-            except RuntimeError:
-                # No running loop, create a new one
-                return asyncio.run(_request_pin_async())
-        except Exception as exc:
-            log.error("Error requesting PIN via Telegram: %s", exc)
+                import asyncio
+                
+                async def _send():
+                    for chat_id in self.chat_ids:
+                        try:
+                            await self.application.bot.send_message(
+                                chat_id=chat_id,
+                                text=message,
+                                parse_mode=ParseMode.MARKDOWN_V2
+                            )
+                            log.info("PIN request sent to chat_id: %s", chat_id)
+                        except TelegramError as exc:
+                            log.error("Error sending PIN request to chat %s: %s", chat_id, exc)
+                
+                # Get the bot's event loop (the one running in the notifier thread)
+                loop = self.application.bot._bot._request[0]._client._transport._pool._loop
+                if loop and loop.is_running():
+                    # Schedule the coroutine in the existing loop
+                    future = asyncio.run_coroutine_threadsafe(_send(), loop)
+                    future.result(timeout=10)
+                else:
+                    log.error("Bot event loop not available")
+            except Exception as exc:
+                log.error("Error sending PIN request: %s", exc)
+        
+        # Send message in separate thread to avoid blocking
+        thread = Thread(target=send_message, daemon=True)
+        thread.start()
+        thread.join(timeout=10)
+        
+        # Wait for PIN response (synchronous wait with timeout)
+        timeout = 120  # 2 minutes
+        elapsed = 0
+        
+        log.info("Waiting for PIN via Telegram (timeout: %d seconds)...", timeout)
+        
+        while self.pending_pin_request and elapsed < timeout:
+            sleep(1)
+            elapsed += 1
+            
+            # Log every 30 seconds
+            if elapsed % 30 == 0:
+                log.debug("Waiting for PIN... %d/%d seconds", elapsed, timeout)
+        
+        # Check if we got the PIN
+        if not self.pin_response:
+            log.error("Timeout: PIN not received within %d seconds", timeout)
+            
+            # Try to send timeout message
+            timeout_msg = "⏱️ *Timeout*\n\nPIN was not received within 2 minutes\\.\nPlease retry the login\\."
+            
+            def send_timeout():
+                try:
+                    import asyncio
+                    
+                    async def _send_timeout():
+                        for chat_id in self.chat_ids:
+                            try:
+                                await self.application.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=timeout_msg,
+                                    parse_mode=ParseMode.MARKDOWN_V2
+                                )
+                            except TelegramError:
+                                pass
+                    
+                    loop = self.application.bot._bot._request[0]._client._transport._pool._loop
+                    if loop and loop.is_running():
+                        future = asyncio.run_coroutine_threadsafe(_send_timeout(), loop)
+                        future.result(timeout=5)
+                except Exception:
+                    pass
+            
+            thread = Thread(target=send_timeout, daemon=True)
+            thread.start()
+            thread.join(timeout=5)
+            
+            # Fallback to manual input
             log.warning("Fallback: please enter the PIN manually")
             return input("Code: ").strip()
+        
+        log.info("PIN successfully received via Telegram")
+        return self.pin_response
 
     @_private
     async def _mute(self, update: Update, context: CallbackContext) -> None:
