@@ -49,7 +49,7 @@ DEFAULT_MAX_POLLING_TRIES = 24  # 24 * POLLING_WAIT_TIME = 2 minutes
 DEFAULT_POLLING_WAIT_TIME = 5  # Seconds
 DEFAULT_APK_VERSION = "24.11.0"
 
-APK_RE_SCRIPT = re.compile(r"AF_initDataCallback({key:s*'ds:5'.*?data:([sS]*?), sideChannel:.+</script")
+APK_RE_SCRIPT = re.compile(r"AF_initDataCallback\({key:\s*'ds:5'.*?data:([\s\S]*?), sideChannel:.+<\/script")
 
 # Datadome constants
 DATADOME_ENDPOINT = "https://api-sdk.datadome.co/sdk/"
