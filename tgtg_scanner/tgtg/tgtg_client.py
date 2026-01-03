@@ -21,6 +21,8 @@ from tgtg_scanner.errors import (
     TgtgPollingError,
 )
 
+from .datadome_manager import DatadomeManager, APKVersionManager
+
 log = logging.getLogger("tgtg")
 BASE_URL = "https://apptoogoodtogo.com/api/"
 API_ITEM_ENDPOINT = "item/v9/"
