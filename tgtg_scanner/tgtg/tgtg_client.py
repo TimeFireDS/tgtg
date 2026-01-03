@@ -28,6 +28,7 @@ API_ITEM_ENDPOINT = "item/v9/"
 FAVORITE_ITEM_ENDPOINT = "user/favorite/v1/{}/update"
 AUTH_BY_EMAIL_ENDPOINT = "auth/v5/authByEmail"
 AUTH_POLLING_ENDPOINT = "auth/v5/authByRequestPollingId"
+AUTH_BY_REQUEST_PIN_ENDPOINT = "auth/v5/authByRequestPin"
 SIGNUP_BY_EMAIL_ENDPOINT = "auth/v5/signUpByEmail"
 REFRESH_ENDPOINT = "token/v1/refresh"
 ACTIVE_ORDER_ENDPOINT = "order/v8/active"
@@ -356,19 +357,24 @@ class TgtgClient:
             else:
                 raise TgtgLoginError(response.status_code, response.content)
 
-    def start_polling(self, polling_id) -> None:
+    def auth_by_request_pin(self, polling_id) -> None:
+        log.warning(
+            "Check your mailbox and insert the code to continue"
+        )
+        pin = input("Code: ").strip()
         for _ in range(self.max_polling_tries):
             response = self._post(
-                AUTH_POLLING_ENDPOINT,
+                AUTH_BY_REQUEST_PIN_ENDPOINT,
                 json={
                     "device_type": self.device_type,
                     "email": self.email,
                     "request_polling_id": polling_id,
+                    "request_pin": pin,
                 },
             )
             if response.status_code == HTTPStatus.ACCEPTED:
                 log.warning(
-                    "Check your mailbox on PC to continue... (Mailbox on mobile won't work, if you have installed tgtg app.)"
+                    "Wait..."
                 )
                 time.sleep(self.polling_wait_time)
                 continue
