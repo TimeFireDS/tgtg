@@ -20,7 +20,6 @@ from tgtg_scanner.errors import (
     TgtgLoginError,
     TgtgPollingError,
 )
-
 from .datadome_manager import DatadomeManager, APKVersionManager
 
 log = logging.getLogger("tgtg")
@@ -126,6 +125,7 @@ class TgtgClient:
         max_polling_tries=DEFAULT_MAX_POLLING_TRIES,
         polling_wait_time=DEFAULT_POLLING_WAIT_TIME,
         device_type="ANDROID",
+        config_path="config.ini",
     ):
         if base_url != BASE_URL:
             log.warning("Using custom tgtg base url: %s", base_url)
@@ -143,7 +143,6 @@ class TgtgClient:
         self.polling_wait_time = polling_wait_time
 
         self.device_type = device_type
-        self.apk_version = apk_version
         self.fixed_user_agent = user_agent
         self.user_agent = user_agent
         self.language = language
@@ -152,6 +151,21 @@ class TgtgClient:
         self.session = None
 
         self.captcha_error_count = 0
+
+        # Initialize APK version manager and Datadome manager
+        self.config_path = config_path
+        self.version_manager = APKVersionManager(config_path)
+
+        # Use provided apk_version or get from manager
+        if apk_version is None:
+            self.apk_version = self.version_manager.get_version()
+            log.info(f"Auto-detected APK version: {self.apk_version}")
+        else:
+            self.apk_version = apk_version
+            log.info(f"Using provided APK version: {self.apk_version}")
+
+        # Initialize Datadome manager with APK version
+        self.datadome_mgr = DatadomeManager(self.apk_version)
 
     def __del__(self) -> None:
         if self.session:
@@ -187,6 +201,37 @@ class TgtgClient:
             "datadome_cookie": self.datadome_cookie,
         }
 
+    def _handle_datadome_403(self, request_url: str) -> bool:
+        """
+        Handle 403 errors by obtaining and applying Datadome cookie
+
+        Args:
+            request_url: The URL that returned 403
+
+        Returns:
+            bool: True if cookie was obtained and should retry, False otherwise
+        """
+        log.warning(f"Attempting to obtain Datadome cookie for {request_url}")
+
+        # Get new Datadome cookie
+        cookie = self.datadome_mgr.get_cookie(request_url)
+
+        if cookie:
+            # Extract just the datadome value from the cookie string
+            if "datadome=" in cookie:
+                self.datadome_cookie = cookie.split("datadome=")[1].split(";")[0]
+                log.info("Successfully obtained new Datadome cookie")
+
+                # Recreate session with new cookie
+                self.session = self._create_session()
+                return True
+            else:
+                log.error("Invalid Datadome cookie format received")
+        else:
+            log.error("Failed to obtain Datadome cookie from DatadomeManager")
+
+        return False
+
     def _post(self, path, **kwargs) -> requests.Response:
         if not self.session:
             self.session = self._create_session()
@@ -201,26 +246,42 @@ class TgtgClient:
             return response
         # Status Code == 403
         # --> Blocked due to rate limit / wrong user_agent.
-        # 1. Try: Get latest APK Version from google
-        # 2. Try: Reset session
-        # 3. Try: Delete datadome cookie and reset session
-        # 10.Try: Sleep 10 minutes, and reset session
+        # Enhanced handling with Datadome cookie generation
         if response.status_code == 403:
             log.debug("Captcha Error 403!")
             self.captcha_error_count += 1
+
+            # Try 1: Get new Datadome cookie from DatadomeManager (NEW)
             if self.captcha_error_count == 1:
+                log.info("Attempt 1: Trying to get Datadome cookie from DatadomeManager")
+                if self._handle_datadome_403(self._get_url(path)):
+                    time.sleep(1)
+                    return self._post(path, **kwargs)
+
+            # Try 2: Get latest APK Version from google
+            if self.captcha_error_count == 2:
+                log.info("Attempt 2: Getting latest APK version")
                 self.user_agent = self._get_user_agent()
-            elif self.captcha_error_count == 2:
+
+            # Try 3: Reset session
+            elif self.captcha_error_count == 3:
+                log.info("Attempt 3: Resetting session")
                 self.session = self._create_session()
+
+            # Try 4: Delete datadome cookie and reset session
             elif self.captcha_error_count == 4:
+                log.info("Attempt 4: Deleting datadome cookie and resetting session")
                 self.datadome_cookie = None
                 self.session = self._create_session()
+
+            # Try 10+: Sleep 10 minutes, and reset session
             elif self.captcha_error_count >= 10:
                 log.warning("Too many captcha Errors! Sleeping for 10 minutes...")
                 time.sleep(10 * 60)
                 log.info("Retrying ...")
                 self.captcha_error_count = 0
                 self.session = self._create_session()
+
             time.sleep(1)
             return self._post(path, **kwargs)
         raise TgtgAPIError(response.status_code, response.content)
@@ -257,7 +318,6 @@ class TgtgClient:
         data = json.loads(match.group(1))
         return data[1][2][140][0][0][0]
 
-    @property
     def _already_logged(self) -> bool:
         return bool(self.access_token and self.refresh_token)
 
@@ -275,7 +335,7 @@ class TgtgClient:
     def login(self) -> None:
         if not (self.email or self.access_token and self.refresh_token):
             raise TGTGConfigurationError("You must provide at least email or access_token and refresh_token")
-        if self._already_logged:
+        if self._already_logged():
             self._refresh_token()
         else:
             log.info("Starting login process ...")
