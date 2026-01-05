@@ -72,6 +72,8 @@ class Telegram(Notifier):
         self.only_reservations = config.telegram.only_reservations
         self.cron = config.telegram.cron
         self.mute: datetime.datetime | None = None
+        self.pending_pin_request = False
+        self.pin_response = None
         self.retries = 0
         if self.enabled:
             if not self.token or not self.body:
@@ -119,6 +121,7 @@ class Telegram(Notifier):
                 filters.Regex(r"^https:\/\/share\.toogoodtogo\.com\/item\/(\d+)\/?"),
                 self._url_handler,
             ),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message),
             CallbackQueryHandler(self._callback_query_handler),
         ]
 
@@ -260,6 +263,132 @@ class Telegram(Notifier):
 
     async def _get_id(self, update: Update, _) -> None:
         await update.message.reply_text(f"Current chat id: {update.message.chat.id}")
+
+    @_private
+    async def _handle_text_message(self, update: Update, _) -> None:
+        """Handles text messages, including PIN when requested."""
+        if self.pending_pin_request:
+            pin = update.message.text.strip()
+            if pin.isdigit() and len(pin) == 6:
+                self.pin_response = pin
+                self.pending_pin_request = False
+                await update.message.reply_text(f"✅ PIN received: {pin}\n\nAuthentication in progress...")
+                log.info("PIN received via Telegram: %s", pin)
+            else:
+                await update.message.reply_text("⚠️ Invalid PIN. Please enter numbers only (6 digits).")
+
+    def request_pin_via_telegram(self) -> str:
+        """Request PIN via Telegram and wait for user response.
+        
+        This method is called synchronously by TgtgClient during login.
+        Reuses the existing bot application to avoid flood control issues.
+        
+        Returns:
+            str: The PIN entered by the user
+            
+        Raises:
+            TgtgLoginError: If PIN is not received within timeout
+        """
+
+        if not self.enabled:
+            log.error("Telegram not enabled. Unable to request PIN.")
+            log.warning("Fallback: please enter the PIN manually")
+            return input("Code: ").strip()
+        
+        # Reset state
+        self.pending_pin_request = True
+        self.pin_response = None
+        
+        log.info("Requesting PIN via Telegram...")
+        
+        # Send PIN request message
+        try:
+            from threading import Thread, Event
+            
+            send_error = None
+            message_sent = Event()
+            
+            def send_pin_message():
+                nonlocal send_error
+                try:
+                    # Simple Bot instance for one-time use
+                    from telegram import Bot
+                    
+                    async def _send():
+                        # Use async context manager for proper cleanup
+                        async with Bot(token=self.token) as bot:
+                            message = (
+                                "🔐 *TGTG authentication required*\n\n"
+                                "Check your email and enter the PIN code you received\\.\n\n"
+                                "⏱️ You have 2 minutes to reply\\."
+                            )
+                            
+                            for chat_id in self.chat_ids:
+                                try:
+                                    await bot.send_message(
+                                        chat_id=chat_id,
+                                        text=message,
+                                        parse_mode=ParseMode.MARKDOWN_V2
+                                    )
+                                    log.info("PIN request sent to chat_id: %s", chat_id)
+                                except TelegramError as exc:
+                                    log.error("Error sending PIN request to chat %s: %s", chat_id, exc)
+                    
+                    # Create new event loop for this thread
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(_send())
+                    finally:
+                        loop.close()
+                    
+                    message_sent.set()
+                except Exception as exc:
+                    send_error = exc
+                    message_sent.set()
+            
+            # Send in background thread
+            thread = Thread(target=send_pin_message, daemon=True)
+            thread.start()
+            
+            # Wait for send to complete (max 10 seconds)
+            if not message_sent.wait(timeout=10):
+                log.error("Timeout sending PIN request")
+            
+            if send_error:
+                # Check if it's a flood control error
+                if "Flood control exceeded" in str(send_error):
+                    log.warning("Telegram flood control - too many recent requests")
+                    log.warning("Please wait a few minutes before trying again")
+                raise send_error
+                
+        except Exception as exc:
+            log.error("Error sending PIN request: %s", exc)
+            log.warning("Fallback: please enter the PIN manually")
+            return input("Code: ").strip()
+        
+        # Wait for PIN response (synchronous wait with timeout)
+        timeout = 300  # 5 minutes
+        elapsed = 0
+        
+        log.info("Waiting for PIN via Telegram (timeout: %d seconds)...", timeout)
+        
+        while self.pending_pin_request and elapsed < timeout:
+            sleep(1)
+            elapsed += 1
+            
+            # Log every 30 seconds
+            if elapsed % 30 == 0:
+                log.debug("Waiting for PIN... %d/%d seconds", elapsed, timeout)
+        
+        # Check if we got the PIN
+        if not self.pin_response:
+            log.error("Timeout: PIN not received within %d seconds", timeout)
+            log.warning("Fallback: please enter the PIN manually")
+            return input("Code: ").strip()
+        
+        log.info("PIN successfully received via Telegram")
+        return self.pin_response
 
     @_private
     async def _mute(self, update: Update, context: CallbackContext) -> None:
