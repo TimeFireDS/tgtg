@@ -269,13 +269,13 @@ class Telegram(Notifier):
         """Handles text messages, including PIN when requested."""
         if self.pending_pin_request:
             pin = update.message.text.strip()
-            if pin.isdigit() and len(pin) >= 4:
+            if pin.isdigit() and len(pin) == 6:
                 self.pin_response = pin
                 self.pending_pin_request = False
                 await update.message.reply_text(f"✅ PIN received: {pin}\n\nAuthentication in progress...")
                 log.info("PIN received via Telegram: %s", pin)
             else:
-                await update.message.reply_text("⚠️ Invalid PIN. Please enter numbers only (minimum 4 digits).")
+                await update.message.reply_text("⚠️ Invalid PIN. Please enter numbers only (6 digits).")
 
     def request_pin_via_telegram(self) -> str:
         """Request PIN via Telegram and wait for user response.
@@ -289,8 +289,9 @@ class Telegram(Notifier):
         Raises:
             TgtgLoginError: If PIN is not received within timeout
         """
-        if not self.token or not self.chat_ids:
-            log.error("Telegram not properly configured. Unable to request PIN.")
+
+        if not self.enabled:
+            log.error("Telegram not enabled. Unable to request PIN.")
             log.warning("Fallback: please enter the PIN manually")
             return input("Code: ").strip()
         
@@ -367,7 +368,7 @@ class Telegram(Notifier):
             return input("Code: ").strip()
         
         # Wait for PIN response (synchronous wait with timeout)
-        timeout = 120  # 2 minutes
+        timeout = 300  # 5 minutes
         elapsed = 0
         
         log.info("Waiting for PIN via Telegram (timeout: %d seconds)...", timeout)
