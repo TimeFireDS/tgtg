@@ -132,15 +132,22 @@ class Scanner:
         return [Item(item, self.location, self.config.locale, self.config.time_format) for item in items]
 
     def _check_item(self, item: Item) -> None:
-        """Checks if the available item amount raised from zero to something
+        """Checks if the available item amount raised from zero to something or price changed
         and triggers notifications.
         """
         state_item = self.state.get(item.item_id)
         if state_item is not None:
-            if state_item.items_available == item.items_available:
-                return
-            log.info("%s - new amount: %s", item.display_name, item.items_available)
-            if state_item.items_available == 0 and item.items_available > 0:
+            item._previous_price = state_item._price
+            send_notification = False
+            if state_item.items_available != item.items_available:
+                log.info("%s - amount changed from %s to %s", item.display_name, state_item.items_available, item.items_available)
+                if state_item.items_available == 0:
+                    send_notification = True
+            if state_item.price != item.price:
+                log.info("%s - price changed from %ss to %s", item.display_name, state_item.price, item.price)
+                if self.config.price_monitoring and item.items_available > 0 and item._price < state_item._price:
+                    send_notification = True
+            if send_notification:
                 self._send_messages(item)
                 self.metrics.send_notifications.labels(item.item_id, item.display_name).inc()
         self.metrics.update(item)
@@ -179,16 +186,13 @@ class Scanner:
             self.config.location.google_maps_api_key,
             self.config.location.origin_address,
         )
-        
         # activate and test notifiers
         if self.config.metrics:
             self.metrics.enable_metrics()
         self.notifiers = Notifiers(self.config, self.reservations, self.favorites)
         self.notifiers.start()
-        
         # Configure PIN callback from Telegram before login
         self._setup_pin_callback()
-        
         # test tgtg API (now with PIN callback configured)
         self.tgtg_client.login()
         self.config.save_tokens(
@@ -196,12 +200,10 @@ class Scanner:
             self.tgtg_client.refresh_token,
             self.tgtg_client.datadome_cookie,
         )
-        
         # test notifications
         if not self.config.disable_tests and self.notifiers.notifier_count > 0:
             log.info("Sending test Notifications ...")
             self.notifiers.send(self._get_test_item())
-        
         # start scanner
         log.info("Scanner started ...")
         running = True
