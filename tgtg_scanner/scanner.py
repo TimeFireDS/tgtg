@@ -165,15 +165,21 @@ class Scanner:
         )
         self.notifiers.send(item)
 
+    def _setup_pin_callback(self) -> None:
+        """Configure the callback to request PIN via Telegram if available."""
+        if self.notifiers is None:
+            return
+        
+        # Search for Telegram notifier among active notifiers
+        for notifier in self.notifiers._notifiers:
+            if hasattr(notifier, 'request_pin_via_telegram'):
+                self.tgtg_client.pin_callback = notifier.request_pin_via_telegram
+                return
+        
+        log.debug("Telegram notifier not found, PIN will be requested from terminal")
+
     def run(self) -> NoReturn:
         """Main Loop of the Scanner."""
-        # test tgtg API
-        self.tgtg_client.login()
-        self.config.save_tokens(
-            self.tgtg_client.access_token,
-            self.tgtg_client.refresh_token,
-            self.tgtg_client.datadome_cookie,
-        )
         # activate location service
         self.location = Location(
             self.config.location.enabled,
@@ -185,6 +191,16 @@ class Scanner:
             self.metrics.enable_metrics()
         self.notifiers = Notifiers(self.config, self.reservations, self.favorites)
         self.notifiers.start()
+        # Configure PIN callback from Telegram before login
+        self._setup_pin_callback()
+        # test tgtg API (now with PIN callback configured)
+        self.tgtg_client.login()
+        self.config.save_tokens(
+            self.tgtg_client.access_token,
+            self.tgtg_client.refresh_token,
+            self.tgtg_client.datadome_cookie,
+        )
+        # test notifications
         if not self.config.disable_tests and self.notifiers.notifier_count > 0:
             log.info("Sending test Notifications ...")
             self.notifiers.send(self._get_test_item())
