@@ -1,3 +1,4 @@
+# Copied and modified from https://github.com/ahivert/tgtg-python
 # Enhanced TGTG Client with retry plugin behavior
 
 import json
